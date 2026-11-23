@@ -79,5 +79,41 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 消息解析与字段映射
+
+模板的「字段映射」列语法为 `目标字段:载荷路径[:期望类型]`，多条用逗号分隔，
+例如 `order_id:order.id, qty:order.qty:int, qty:items.count:int`。路径支持
+`order.qty`、`items[0].count` 这样的点号和数组下标。解析结果取载荷里的真实值，
+不会把路径字符串当成结果。
+
+解析结论只有「已交付」和「暂停交付」两种，暂停时给出未交付理由：
+
+| 情况 | 表现 |
+| --- | --- |
+| 路径取到非空值 | 交付，`field_details` 记录该字段采用的原路径 |
+| 载荷里是 `0` / `false` | 按真实值交付，不当作缺失 |
+| 载荷里是 `null` | 交付 `null`，状态标为 `null`，与路径不存在区分开 |
+| 路径不存在 / 类型不符 | `field_errors` 给出字段、路径、期望与实际类型，暂停交付（该字段另有其他路径取到值时记为未阻断） |
+| 多条路径写同一目标且值一致 | 交付，保留全部路径，取首条（或已确认来源） |
+| 多条路径写同一目标且值不一致 | 该字段不取值，生成 `待复核` 冲突并记录原始载荷与映射，整个结果暂停交付 |
+| 已确认来源在新载荷里不可用 | 不悄悄换用其他路径，生成待复核冲突并暂停交付 |
+
+相关接口（仅 `message_parser` 模块，其他模块路径返回 404）：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/message_parser/{id}/parse` | 入参 `{ payload, message_id?, confirmed_sources? }`，`payload` 可为 JSON 字符串或对象 |
+| `GET /api/message_parser/{id}/snapshots` | 按修订号列出解析依据（载荷 sha256、映射、各字段路径、交付结论） |
+| `GET /api/message_parser/{id}/conflicts` | 列出冲突记录，含 `待复核` 的原始载荷与候选值 |
+| `POST /api/message_parser/{id}/conflicts/{cid}/resolve` | 入参 `{ path, operator, remark }`，确认来源并按最新载荷重新解析 |
+| `GET /api/message_parser/{id}/deliveries` | 交付记录，可筛 `暂停交付` 查看未交付理由 |
+| `GET /api/message_parser/{id}/transformations` | 最近一次解析的字段转换列表：解析字段、采用路径、原值与实际转换值 |
+| `POST /api/api_connector/{id}/ingest` | 连接器接入入口：原载荷落库后与匹配模板一起送进解析接口 |
+
+字段转换列表只对解析成功取到值的字段生成，并且绑定该字段实际采用的原路径；
+冲突未裁决时不会为它写入转换值。
+
+后端回归测试：`cd backend && .venv/bin/python -m unittest discover -s tests -v`
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

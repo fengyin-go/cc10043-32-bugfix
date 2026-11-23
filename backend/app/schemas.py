@@ -29,3 +29,17 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class ParsePayload(BaseModel):
+    """解析接口入参：原载荷（字符串或JSON对象）与可选的消息标识、已确认来源。"""
+
+    payload: Any = None
+    message_id: str | None = None
+    confirmed_sources: dict[str, str] = Field(default_factory=dict)
+
+
+class ConflictResolutionPayload(BaseModel):
+    path: str
+    operator: str = ""
+    remark: str = ""

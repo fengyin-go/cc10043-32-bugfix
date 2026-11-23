@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,6 +93,80 @@ class ApiConnectorService(BaseModuleService):
             if tpl.get("status") == "已启用" and tpl.get("消息格式", "").casefold() in endpoint.casefold():
                 return tpl.get("模板名称", "")
         return None
+
+    def match_parser_template(self, entry_id: int) -> dict[str, Any] | None:
+        """为连接器匹配解析模板：显式绑定优先，否则按端点中的消息格式匹配。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None
+        bound = entry.get("解析模板")
+        templates = [
+            tpl for tpl in store.rows("message_parser") if tpl.get("status") == "已启用"
+        ]
+        if bound:
+            for tpl in templates:
+                if tpl.get("模板名称") == bound:
+                    return tpl
+        endpoint = str(entry.get("API端点", "")).casefold()
+        for tpl in templates:
+            fmt = str(tpl.get("消息格式", "")).casefold()
+            if fmt and fmt in endpoint:
+                return tpl
+        if len(templates) == 1:
+            return templates[0]
+        return None
+
+    def ingest_to_parser(
+        self, entry_id: int, payload: Any, message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """接入入口：把原载荷与匹配到的模板一起送进解析接口。
+
+        原载荷先落一份到消息载荷存储，解析由模板服务完成；连接器不自行解释字段。
+        """
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在"}
+        template = self.match_parser_template(entry_id)
+        if template is None:
+            return {
+                "ok": False,
+                "message": "未匹配到可用的解析模板",
+                "connector": entry.get("连接器名称", ""),
+            }
+        mid = message_id or f"api-msg-{entry_id}-{datetime.now(timezone.utc).timestamp():.0f}"
+        payload_text = payload if isinstance(payload, str) else json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, default=str)
+        payload_rows = store.rows("payload_store")
+        batch = f"api-{entry.get('连接器名称', 'unnamed')}-{entry_id}"
+        payload_rows.append({
+            "id": max((int(r.get("id", 0)) for r in payload_rows), default=0) + 1,
+            "采集批次": batch,
+            "消息ID": mid,
+            "原始载荷": payload_text,
+            "存储时间": datetime.now(timezone.utc).isoformat(),
+            "压缩后大小": str(len(payload_text.encode("utf-8"))),
+            "status": "已存储",
+            "pending": True,
+            "abnormal": False,
+        })
+        from app.services.message_parser import MessageParserService
+
+        parsed = MessageParserService().parse_message(
+            int(template.get("id", 0)),
+            payload_text,
+            source=f"api_connector:{entry_id}/{mid}",
+        )
+        parsed["connector"] = {
+            "id": entry_id,
+            "name": entry.get("连接器名称", ""),
+            "message_id": mid,
+            "payload_stored": True,
+        }
+        parsed["matched_template"] = {
+            "id": template.get("id"),
+            "name": template.get("模板名称", ""),
+        }
+        return parsed
 
     def record_audit(self, entry_id: int, action: str, detail: str) -> None:
         """写入流数据处理审计记录。"""

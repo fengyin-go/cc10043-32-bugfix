@@ -14,12 +14,23 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 内部审计表：解析快照、冲突待复核记录、交付记录、转换记录。
+        # 它们不是业务模块，不能出现在模块列表和运营概览里。
+        self._artifacts: dict[str, list[dict[str, Any]]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
+
+    def artifacts(self, name: str) -> list[dict[str, Any]]:
+        """内部审计表的读写入口，与业务模块表隔离。"""
+        return self._artifacts.setdefault(name, [])
+
+    def next_id(self, name: str) -> int:
+        rows = self.artifacts(name)
+        return max((int(row.get("id", 0)) for row in rows), default=0) + 1
 
     def find(self, module: str, entry_id: int) -> dict[str, Any] | None:
         for row in self.rows(module):
